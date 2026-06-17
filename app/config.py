@@ -62,6 +62,7 @@ class RingCentralSettings(EnvSettings):
     client_id: str = Field(default="", validation_alias="RINGCENTRAL_CLIENT_ID")
     client_secret: str = Field(default="", validation_alias="RINGCENTRAL_CLIENT_SECRET")
     account_id: str = Field(default="", validation_alias="RINGCENTRAL_ACCOUNT_ID")
+    access_token: str = Field(default="", validation_alias="RINGCENTRAL_ACCESS_TOKEN")
     webhook_verification_token: str = Field(
         default="",
         validation_alias="RINGCENTRAL_WEBHOOK_VERIFICATION_TOKEN",

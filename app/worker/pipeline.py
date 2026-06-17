@@ -2,7 +2,7 @@
 
 import logging
 
-from app.matching.review_queue import send_to_review
+from app.adapters.crm.factory import get_crm_clients
 from app.models.call_event import CallEvent
 from app.models.match_result import MatchMethod, MatchResult
 from app.models.note import ExtractedNote
@@ -32,10 +32,9 @@ async def run(event: CallEvent) -> None:
         event = await s2_fetch.fetch_recording(event)
         transcript = await s3_transcribe.transcribe(event)
         note = await s4_extract.extract(transcript, event.workspace)
-        match_result = await s5_match.match_lead(event, note)
+        match_result = await s5_match.match_lead(event, get_crm_clients())
 
         if match_result.requires_review:
-            await send_to_review(event, "Low-confidence or unmatched CRM record.")
             raise ValueError("Lead match requires manual review; CRM write skipped.")
 
         s6_route.route(match_result, event)
