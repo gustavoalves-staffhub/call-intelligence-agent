@@ -1,4 +1,4 @@
-"""Anthropic-backed note extraction helper."""
+"""Vertex-backed note extraction helper."""
 
 import importlib
 import json
@@ -10,20 +10,23 @@ _SUPPORTED_WORKSPACES = {"intake", "medhub", "grs"}
 
 
 async def extract_note(transcript: str, workspace: str) -> dict[str, Any]:
-    """Extract structured note JSON from a transcript using Anthropic."""
+    """Extract structured note JSON from a transcript using Anthropic on Vertex AI."""
 
     if workspace not in _SUPPORTED_WORKSPACES:
         raise ValueError(f"Unsupported workspace for extraction: {workspace}")
 
-    from anthropic import AsyncAnthropic
+    from anthropic import AsyncAnthropicVertex
 
     prompt_module = importlib.import_module(f"app.extraction.prompts.{workspace}")
     system_prompt = str(getattr(prompt_module, "SYSTEM_PROMPT"))
     settings = get_settings()
-    if not settings.llm.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY must be configured before extraction.")
+    if not settings.gcp.project_id:
+        raise RuntimeError("GCP_PROJECT_ID must be configured before Vertex extraction.")
 
-    client = AsyncAnthropic(api_key=settings.llm.anthropic_api_key)
+    client = AsyncAnthropicVertex(
+        region=settings.gcp.vertex_region,
+        project_id=settings.gcp.project_id,
+    )
     response = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1000,

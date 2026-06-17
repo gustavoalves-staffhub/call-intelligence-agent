@@ -27,6 +27,7 @@ class GCPSettings(EnvSettings):
 
     project_id: str = Field(default="", validation_alias="GCP_PROJECT_ID")
     region: str = Field(default="", validation_alias="GCP_REGION")
+    vertex_region: str = Field(default="us-east5", validation_alias="VERTEX_REGION")
     bq_project: str = Field(default="keep-calm-database", validation_alias="BQ_PROJECT")
     pubsub_topic_call_completed: str = Field(
         default="call.completed",
@@ -84,12 +85,6 @@ class STTSettings(EnvSettings):
         default="deepgram",
         validation_alias="STT_PROVIDER",
     )
-
-
-class LLMSettings(EnvSettings):
-    """LLM provider settings."""
-
-    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
 
 
 class WorkspaceCRMSettings(EnvSettings):
@@ -178,7 +173,6 @@ class Settings(EnvSettings):
     gcs: GCSSettings = Field(default_factory=GCSSettings)
     telephony: TelephonySettings = Field(default_factory=TelephonySettings)
     stt: STTSettings = Field(default_factory=STTSettings)
-    llm: LLMSettings = Field(default_factory=LLMSettings)
     crm: CRMSettings = Field(default_factory=CRMSettings.from_env)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
@@ -189,6 +183,7 @@ class Settings(EnvSettings):
         return {
             "gcp_project_id": self.gcp.project_id,
             "gcp_region": self.gcp.region,
+            "vertex_region": self.gcp.vertex_region,
             "bq_project": self.gcp.bq_project,
             "poll_interval_minutes": self.pipeline.poll_interval_minutes,
             "pubsub_topic": self.gcp.pubsub_topic_call_completed,
