@@ -27,6 +27,7 @@ class GCPSettings(EnvSettings):
 
     project_id: str = Field(default="", validation_alias="GCP_PROJECT_ID")
     region: str = Field(default="", validation_alias="GCP_REGION")
+    bq_project: str = Field(default="keep-calm-database", validation_alias="BQ_PROJECT")
     pubsub_topic_call_completed: str = Field(
         default="call.completed",
         validation_alias="PUBSUB_TOPIC_CALL_COMPLETED",
@@ -162,6 +163,7 @@ class PipelineSettings(EnvSettings):
         default=0.8,
         validation_alias="MATCH_CONFIDENCE_THRESHOLD",
     )
+    poll_interval_minutes: int = Field(default=5, validation_alias="POLL_INTERVAL_MINUTES")
     slack_review_queue_webhook_url: str = Field(
         default="",
         validation_alias="SLACK_REVIEW_QUEUE_WEBHOOK_URL",
@@ -186,6 +188,8 @@ class Settings(EnvSettings):
         return {
             "gcp_project_id": self.gcp.project_id,
             "gcp_region": self.gcp.region,
+            "bq_project": self.gcp.bq_project,
+            "poll_interval_minutes": self.pipeline.poll_interval_minutes,
             "pubsub_topic": self.gcp.pubsub_topic_call_completed,
             "pubsub_subscription": self.gcp.pubsub_subscription_worker,
             "audio_bucket": self.gcs.audio_bucket,

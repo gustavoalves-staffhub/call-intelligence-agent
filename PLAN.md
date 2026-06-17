@@ -7,6 +7,10 @@
 - Intake audio bucket: `pb-dispositions-call-recordings` (exists)
 - MedHub telephony: RingCentral
 - Both Intake and MedHub use Twenty CRM (same server)
+- Worker trigger: BigQuery polling
+- BigQuery project: `keep-calm-database`
+- Intake polling source: `phoneburner_logs.call_events`
+- MedHub polling source: `RingCentral.Call_Logs`
 - CRM server URL: `https://crm-server-prod-878822316507.us-central1.run.app`
 - GraphQL endpoint: `/graphql`
 - Auth: `Authorization: Bearer <token>` — no extra headers needed
@@ -45,3 +49,4 @@
 | 2026-06-16 | `leads` as primary matching object | Confirmed via live API + Codex codebase analysis |
 | 2026-06-16 | Single CRM server for all workspaces | Workspace selected by token, not by URL |
 | 2026-06-16 | `createPhoneCall` as primary write target | Native object with all required fields; Note linked via NoteTarget |
+| 2026-06-17 | BigQuery polling as worker trigger | PhoneBurner and RingCentral connected-call logs are available in BigQuery |

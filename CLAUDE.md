@@ -6,7 +6,8 @@ transcribes them, and writes structured notes to Twenty CRM workspaces.
 
 ## Architecture
 Two Cloud Run services: `receiver` (webhook handler) and `worker` (pipeline).
-Connected via GCP Pub/Sub. Audio stored in GCS. Notes written via Twenty GraphQL API.
+The current worker trigger is BigQuery polling over recent PhoneBurner and
+RingCentral call logs. Audio stored in GCS. Notes written via Twenty GraphQL API.
 
 ## Key pending items (do not implement until resolved)
 - `app/adapters/crm/` — Twenty CRM GraphQL mutations are TBD (pending codebase analysis)

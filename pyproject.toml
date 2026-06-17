@@ -8,6 +8,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "google-cloud-pubsub",
+    "google-cloud-bigquery",
     "google-cloud-storage",
     "google-cloud-secret-manager",
     "deepgram-sdk",
