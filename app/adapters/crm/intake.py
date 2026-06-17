@@ -153,12 +153,13 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
             phone_call_id=phone_call_id,
             lead_id=lead_id,
         )
+        current_contact_attempt_count = await self.get_contact_attempt_count(lead_id)
         await self.update_fields(
             lead_id,
             {
                 "summary": note.summary,
                 "lastContactAttemptAt": _call_timestamp(event),
-                "contactAttemptCount": {"increment": 1},
+                "contactAttemptCount": current_contact_attempt_count + 1,
             },
         )
         return CallWriteResult(
@@ -284,23 +285,55 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
             update_data["summary"] = fields["summary"]
         if "lastContactAttemptAt" in fields:
             update_data["lastContactAttemptAt"] = _coerce_datetime(fields["lastContactAttemptAt"])
-        update_data["contactAttemptCount"] = fields.get("contactAttemptCount", {"increment": 1})
+        if "contactAttemptCount" in fields:
+            update_data["contactAttemptCount"] = int(fields["contactAttemptCount"])
 
         mutation = """
-          mutation UpdateLead($where: LeadWhereUniqueInput!, $data: LeadUpdateInput!) {
-            updateLead(where: $where, data: $data) { id }
+          mutation UpdateLead($id: UUID!, $data: LeadUpdateInput!) {
+            updateLead(id: $id, data: $data) { id }
           }
         """
         data = await self.gql_request(
             mutation,
             {
-                "where": {"id": record_id},
+                "id": record_id,
                 "data": update_data,
             },
         )
         updated_lead = data.get("updateLead")
         if not isinstance(updated_lead, dict) or not updated_lead.get("id"):
             raise TwentyCRMError("updateLead did not return an id.")
+
+    async def get_contact_attempt_count(self, lead_id: str) -> int:
+        """Read the current contactAttemptCount for a Lead by id."""
+
+        query = """
+          query GetLeadContactAttemptCount($id: UUID!) {
+            leads(filter: { id: { eq: $id } }) {
+              edges {
+                node {
+                  id
+                  contactAttemptCount
+                }
+              }
+            }
+          }
+        """
+        data = await self.gql_request(query, {"id": lead_id})
+        lead = self.first_edge_node(data.get("leads"))
+        if lead is None:
+            raise TwentyCRMError(f"Lead {lead_id!r} was not found.")
+
+        raw_count = lead.get("contactAttemptCount")
+        if raw_count is None:
+            return 0
+
+        try:
+            return int(raw_count)
+        except (TypeError, ValueError) as exc:
+            raise TwentyCRMError(
+                f"Lead {lead_id!r} returned invalid contactAttemptCount: {raw_count!r}"
+            ) from exc
 
     async def update_call_disposition(self, record_id: str, call_disposition: str) -> None:
         """Update callDisposition once the workspace data model is approved."""

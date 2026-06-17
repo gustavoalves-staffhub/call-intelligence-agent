@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -53,8 +54,14 @@ async def extract(transcript: str, workspace: str) -> ExtractedNote:
     )
 
     raw_response = _response_text(response.content)
+    raw = raw_response.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        raw = raw.strip()
+
     try:
-        raw_note = json.loads(raw_response)
+        raw_note = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Anthropic response was not valid strict JSON: {raw_response}"
