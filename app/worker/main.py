@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+from app.adapters.crm.base import TwentyCRMError, is_twenty_rate_limit_error
 from app.worker import pipeline
 from app.worker.steps.s1_ingest import poll_new_calls
 
@@ -16,7 +17,26 @@ async def process_polled_calls() -> None:
     logger.info("BigQuery polling found %d unprocessed call(s).", len(events))
 
     for event in events:
-        await pipeline.run(event)
+        try:
+            await pipeline.run(event)
+        except pipeline.ManualReviewRequiredError as exc:
+            logger.warning(
+                "Call requires manual review; continuing to next event. call_id=%s reason=%s",
+                event.call_id,
+                exc,
+            )
+            continue
+        except TwentyCRMError as exc:
+            if not is_twenty_rate_limit_error(exc):
+                raise
+
+            logger.warning(
+                "Twenty CRM rate limit reached; continuing to next event. "
+                "call_id=%s reason=%s",
+                event.call_id,
+                exc,
+            )
+            continue
 
 
 def main() -> None:

@@ -10,7 +10,7 @@ both, and may use speaker labels like [Agent] and [Lead].
 Return strict JSON only. Do not wrap the JSON in markdown or add explanatory
 text. The JSON object must match this IntakeCallNote shape exactly:
 {
-  "summary": "string, 2-3 sentence summary in English",
+  "summary": "string, detailed 4-6 sentence summary in English",
   "disposition": "Interested | Not Interested | Callback | Signed | No Answer | another explicitly stated outcome",
   "next_steps": "string or null",
   "callback_date": "YYYY-MM-DD or null",
@@ -23,7 +23,13 @@ text. The JSON object must match this IntakeCallNote shape exactly:
 }
 
 Extraction rules:
-- Write summary in English even when the transcript is Spanish.
+- Write the summary in English even when the transcript is Spanish.
+- Write a detailed summary of 4-6 sentences covering: who was called and why;
+  key facts about the accident, including date, location, type, and fault when
+  explicitly stated; injuries and medical treatment mentioned; current legal
+  situation, including attorney involvement, signed documents, or interest level;
+  and the outcome of this specific call plus any next steps agreed upon. Never
+  use generic phrases like "the agent called". Be specific.
 - Use only facts explicitly stated in the transcript.
 - If a nullable field is not mentioned, return null. Never return "no data".
 - Never infer or fabricate dates, injuries, case types, objections, or next steps.
@@ -54,7 +60,7 @@ Example transcript:
 
 Example output:
 {
-  "summary": "Lead was involved in a rear-end collision approximately two years ago. His car was totaled and he received only $5,000 in settlement. He previously consulted with a friend who is an attorney but already signed settlement papers.",
+  "summary": "Rafael spoke with Ayuda Latina's legal team about a possible motor vehicle accident claim. He said he was rear-ended approximately two years ago and the collision damaged the back of his vehicle, including the trunk. He reported that the car was declared a total loss and that he received only $5,000 from the settlement. Rafael did not mention physical injuries or medical treatment in this transcript. He previously consulted a friend who works at a law firm and already signed settlement papers, but he appeared interested in understanding whether anything else could be done.",
   "disposition": "Interested",
   "next_steps": null,
   "callback_date": null,

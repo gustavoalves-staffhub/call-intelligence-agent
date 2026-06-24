@@ -21,6 +21,8 @@ class CallEvent(BaseModel):
     workspace: str
     phone_from: str
     phone_to: str
+    patient_phone_primary: str | None = None
+    patient_phone_fallback: str | None = None
     duration_sec: int = Field(ge=0)
     agent_id: str | None
     gcs_audio_uri: str | None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
@@ -11,9 +13,32 @@ import httpx
 from app.models.call_event import CallEvent
 from app.models.note import ExtractedNote
 
+logger = logging.getLogger(__name__)
+
+_RATE_LIMIT_RETRY_COUNT = 3
+_RATE_LIMIT_RETRY_DELAY_SECONDS = 60
+
 
 class TwentyCRMError(RuntimeError):
     """Raised when Twenty CRM rejects or cannot complete a request."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Store the GraphQL extension code when Twenty returns one."""
+
+        super().__init__(message)
+        self.code = code
+
+
+def is_twenty_rate_limit_error(error: TwentyCRMError) -> bool:
+    """Return True when a Twenty error matches the token/rate-limit shape."""
+
+    message = str(error)
+    message_lower = message.lower()
+    code = error.code or ""
+    return "limit reached" in message_lower or (
+        code == "BAD_USER_INPUT"
+        and ("token" in message_lower or "rate" in message_lower)
+    )
 
 
 @dataclass(frozen=True)
@@ -93,12 +118,40 @@ class TwentyGraphQLClient:
         query: str,
         variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """POST a GraphQL operation to `/graphql` with bearer auth."""
+        """POST a GraphQL operation to `/graphql` with bearer auth and retries."""
 
         if not self.base_url:
             raise TwentyCRMError("Twenty CRM base_url is required.")
         if not self.api_token:
             raise TwentyCRMError("Twenty CRM api_token is required.")
+
+        for attempt in range(_RATE_LIMIT_RETRY_COUNT + 1):
+            try:
+                return await self._gql_request_once(query, variables)
+            except TwentyCRMError as exc:
+                if (
+                    not is_twenty_rate_limit_error(exc)
+                    or attempt >= _RATE_LIMIT_RETRY_COUNT
+                ):
+                    raise
+
+                logger.warning(
+                    "Twenty CRM rate limit reached; retrying GraphQL request "
+                    "in %d seconds. attempt=%d/%d",
+                    _RATE_LIMIT_RETRY_DELAY_SECONDS,
+                    attempt + 1,
+                    _RATE_LIMIT_RETRY_COUNT,
+                )
+                await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY_SECONDS)
+
+        raise TwentyCRMError("Twenty CRM GraphQL retry loop exited unexpectedly.")
+
+    async def _gql_request_once(
+        self,
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST one GraphQL operation attempt to `/graphql` with bearer auth."""
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(
@@ -123,7 +176,7 @@ class TwentyGraphQLClient:
             extensions = first_error.get("extensions") or {}
             code = extensions.get("code") if isinstance(extensions, dict) else None
             suffix = f" (Code: {code})" if code else ""
-            raise TwentyCRMError(f"{message}{suffix}")
+            raise TwentyCRMError(f"{message}{suffix}", code=code)
 
         data = payload.get("data")
         if not isinstance(data, dict):

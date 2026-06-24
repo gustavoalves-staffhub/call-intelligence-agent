@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from app.adapters.crm.base import CRMClient
 from app.config import get_settings
@@ -36,7 +36,11 @@ async def match_lead(
     if client is None:
         return await _review_required(event, "No CRM client configured for workspace.")
 
-    phone_match = await _match_by_phone(event, client)
+    phone_match = (
+        await _match_medhub_by_phone(event, client)
+        if event.source is CallSource.RINGCENTRAL and event.workspace == "medhub"
+        else await _match_by_phone(event, client)
+    )
     if phone_match is not None:
         return phone_match
 
@@ -68,6 +72,27 @@ async def _match_by_phone(event: CallEvent, client: CRMClient) -> MatchResult | 
         record=record,
         confidence=1.0,
         method=MatchMethod.PHONE,
+        matched_on_phone="primary",
+    )
+
+
+async def _match_medhub_by_phone(event: CallEvent, client: CRMClient) -> MatchResult | None:
+    """Try MedHub patient phone candidates in RingCentral primary/fallback order."""
+
+    primary_phone, fallback_phone = _medhub_patient_phone_candidates(event)
+    if not primary_phone and not fallback_phone:
+        return None
+
+    record = await cast(Any, client).find_record_by_phone(primary_phone, fallback_phone)
+    if not record:
+        return None
+
+    return _match_result(
+        event=event,
+        record=record,
+        confidence=1.0,
+        method=MatchMethod.PHONE,
+        matched_on_phone=_matched_on_phone(record, default="primary"),
     )
 
 
@@ -115,6 +140,7 @@ def _match_result(
     record: dict[str, Any],
     confidence: float,
     method: MatchMethod,
+    matched_on_phone: Literal["primary", "fallback", "none"] = "none",
 ) -> MatchResult:
     """Build a MatchResult and apply the configured confidence threshold."""
 
@@ -126,6 +152,7 @@ def _match_result(
         confidence=confidence,
         method=method,
         requires_review=confidence < threshold,
+        matched_on_phone=matched_on_phone,
     )
 
 
@@ -155,6 +182,35 @@ def _normalize_phone(phone: str) -> _PhoneParts:
     raise ValueError(f"Cannot normalize phone number {phone!r} for CRM matching.")
 
 
+def _medhub_patient_phone_candidates(event: CallEvent) -> tuple[str, str | None]:
+    """Return RingCentral patient-phone candidates for MedHub matching."""
+
+    primary = (
+        event.patient_phone_primary
+        or _str_value(event.raw_payload.get("patient_phone_primary"))
+        or event.phone_from
+    )
+    fallback = (
+        event.patient_phone_fallback
+        or _str_value(event.raw_payload.get("patient_phone_fallback"))
+        or event.phone_to
+    )
+    return primary, fallback or None
+
+
+def _matched_on_phone(
+    record: dict[str, Any],
+    *,
+    default: Literal["primary", "fallback", "none"],
+) -> Literal["primary", "fallback", "none"]:
+    """Read the internal phone-candidate label from a MedHub CRM match."""
+
+    label = record.get("_matched_on_phone")
+    if label in {"primary", "fallback"}:
+        return cast(Literal["primary", "fallback"], label)
+    return default
+
+
 def _name_from_payload(event: CallEvent) -> str | None:
     """Extract source-specific fallback name from raw_payload."""
 
@@ -165,8 +221,8 @@ def _name_from_payload(event: CallEvent) -> str | None:
         )
 
     if event.source is CallSource.RINGCENTRAL:
-        from_name = _str_value(event.raw_payload.get("from_name"))
-        parts = from_name.split()
+        to_name = _str_value(event.raw_payload.get("to_name"))
+        parts = to_name.split()
         if not parts:
             return None
         return _join_name(parts[0], " ".join(parts[1:]))

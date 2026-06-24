@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS call_audit_log (
     gcs_transcript_uri  TEXT,
     match_confidence    FLOAT,
     match_method        VARCHAR(50),
+    matched_on_phone    VARCHAR(20) DEFAULT 'none',
     note_created        BOOLEAN DEFAULT FALSE,
     review_required     BOOLEAN DEFAULT FALSE,
     error_message       TEXT,

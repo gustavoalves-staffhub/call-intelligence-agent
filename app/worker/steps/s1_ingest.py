@@ -3,56 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from app.adapters.telephony.ringcentral import RingCentralAdapter
 from app.config import get_settings
 from app.models.call_event import CallEvent, CallSource
-from app.storage.audit import is_processed
+from app.storage.audit import PROCESSED_CALL_IDS_QUERY, is_processed, processed_call_ids
+
+logger = logging.getLogger(__name__)
 
 _PHONEBURNER_QUERY = """
 SELECT *
 FROM `phoneburner_logs.call_events`
 WHERE connected = @connected
   AND duration >= @min_duration_seconds
-  AND end_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @poll_interval_minutes MINUTE)
   AND recording_gcs_uri IS NOT NULL
+ORDER BY end_time ASC
 """
-
-_RINGCENTRAL_QUERY = """
-SELECT *
-FROM `RingCentral.Call_Logs`
-WHERE result = @connected_result
-  AND duration >= CAST(@min_duration_seconds AS NUMERIC)
-  AND finishTime >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @poll_interval_minutes MINUTE)
-  AND record_uri IS NOT NULL
-"""
+_MAX_UNPROCESSED_BATCH_SIZE = 200
 
 
 async def poll_new_calls() -> list[CallEvent]:
-    """Poll BigQuery for recent connected calls and return unprocessed events."""
+    """Poll call sources for recent connected calls and return unprocessed events."""
 
-    settings = get_settings()
-    phoneburner_rows, ringcentral_rows = await asyncio.gather(
-        _query_phoneburner_rows(
-            bq_project=settings.gcp.bq_project,
-            min_duration_seconds=settings.pipeline.min_call_duration_seconds,
-            poll_interval_minutes=settings.pipeline.poll_interval_minutes,
-        ),
-        _query_ringcentral_rows(
-            bq_project=settings.gcp.bq_project,
-            min_duration_seconds=settings.pipeline.min_call_duration_seconds,
-            poll_interval_minutes=settings.pipeline.poll_interval_minutes,
-        ),
+    phoneburner_events, ringcentral_events = await asyncio.gather(
+        _poll_phoneburner(),
+        _poll_ringcentral_api(),
     )
 
-    events = [
-        *[_phoneburner_row_to_event(row) for row in phoneburner_rows],
-        *[_ringcentral_row_to_event(row) for row in ringcentral_rows],
-    ]
-    return await _filter_unprocessed(events)
+    events = [*phoneburner_events, *ringcentral_events]
+    capped_events = _cap_candidate_batch(events)
+    return await _filter_unprocessed(capped_events)
 
 
 async def check_idempotency(call_id: str) -> bool:
@@ -61,13 +46,46 @@ async def check_idempotency(call_id: str) -> bool:
     return await is_processed(call_id)
 
 
+async def _poll_phoneburner() -> list[CallEvent]:
+    """Poll PhoneBurner calls from BigQuery."""
+
+    settings = get_settings()
+    rows = await _query_phoneburner_rows(
+        bq_project=settings.gcp.bq_project,
+        min_duration_seconds=settings.pipeline.min_call_duration_seconds,
+    )
+    return [_phoneburner_row_to_event(row) for row in rows]
+
+
+async def _poll_ringcentral_api() -> list[CallEvent]:
+    """Poll RingCentral call logs through the API for recent MedHub recordings."""
+
+    settings = get_settings()
+    adapter = RingCentralAdapter()
+    date_from = _isoformat_utc(
+        datetime.now(UTC) - timedelta(minutes=settings.pipeline.poll_interval_minutes)
+    )
+    records = await adapter.list_call_log(
+        date_from=date_from,
+        recording_type="All",
+        per_page=100,
+    )
+    return [
+        _ringcentral_record_to_event(record)
+        for record in records
+        if _is_ringcentral_connected_record(
+            record,
+            min_duration_seconds=settings.pipeline.min_call_duration_seconds,
+        )
+    ]
+
+
 async def _query_phoneburner_rows(
     *,
     bq_project: str,
     min_duration_seconds: int,
-    poll_interval_minutes: int,
 ) -> list[dict[str, Any]]:
-    """Query recent PhoneBurner connected call rows."""
+    """Query all eligible PhoneBurner connected call rows."""
 
     return await _query_rows(
         bq_project=bq_project,
@@ -75,26 +93,6 @@ async def _query_phoneburner_rows(
         query_parameters=[
             _scalar_query_parameter("connected", "BOOL", True),
             _scalar_query_parameter("min_duration_seconds", "INT64", min_duration_seconds),
-            _scalar_query_parameter("poll_interval_minutes", "INT64", poll_interval_minutes),
-        ],
-    )
-
-
-async def _query_ringcentral_rows(
-    *,
-    bq_project: str,
-    min_duration_seconds: int,
-    poll_interval_minutes: int,
-) -> list[dict[str, Any]]:
-    """Query recent RingCentral connected call rows."""
-
-    return await _query_rows(
-        bq_project=bq_project,
-        query=_RINGCENTRAL_QUERY,
-        query_parameters=[
-            _scalar_query_parameter("connected_result", "STRING", "Call connected"),
-            _scalar_query_parameter("min_duration_seconds", "INT64", min_duration_seconds),
-            _scalar_query_parameter("poll_interval_minutes", "INT64", poll_interval_minutes),
         ],
     )
 
@@ -110,6 +108,10 @@ async def _query_rows(
     if not bq_project:
         raise RuntimeError("BQ_PROJECT must be configured for BigQuery polling.")
 
+    logger.info(
+        "BigQuery candidate call polling SQL:\n%s",
+        query.strip(),
+    )
     return await asyncio.to_thread(
         _query_rows_sync,
         bq_project,
@@ -144,12 +146,33 @@ def _scalar_query_parameter(name: str, type_: str, value: Any) -> Any:
 async def _filter_unprocessed(events: list[CallEvent]) -> list[CallEvent]:
     """Remove calls that already have successful audit-log rows."""
 
-    processed_flags = await asyncio.gather(*(is_processed(event.call_id) for event in events))
-    return [
-        event
-        for event, already_processed in zip(events, processed_flags, strict=True)
-        if not already_processed
-    ]
+    call_ids = [event.call_id for event in events]
+    logger.info(
+        "Cloud SQL call_audit_log batch idempotency SQL used to exclude "
+        "already-processed call IDs:\n%s\nCriterion: call_id is processed when "
+        "processed_at IS NOT NULL AND error_message IS NULL. Checking %d "
+        "candidate call_id(s) in one PostgreSQL array query.",
+        PROCESSED_CALL_IDS_QUERY.strip(),
+        len(call_ids),
+    )
+    already_processed_call_ids = await processed_call_ids(call_ids)
+    return [event for event in events if event.call_id not in already_processed_call_ids]
+
+
+def _cap_candidate_batch(events: list[CallEvent]) -> list[CallEvent]:
+    """Cap large candidate batches before Cloud SQL idempotency checks."""
+
+    if len(events) <= _MAX_UNPROCESSED_BATCH_SIZE:
+        return events
+
+    logger.warning(
+        "Candidate call count %d exceeds batch cap %d; checking the first %d "
+        "event(s) this run and leaving the rest for later runs.",
+        len(events),
+        _MAX_UNPROCESSED_BATCH_SIZE,
+        _MAX_UNPROCESSED_BATCH_SIZE,
+    )
+    return events[:_MAX_UNPROCESSED_BATCH_SIZE]
 
 
 def _phoneburner_row_to_event(row: dict[str, Any]) -> CallEvent:
@@ -174,21 +197,52 @@ def _phoneburner_row_to_event(row: dict[str, Any]) -> CallEvent:
     )
 
 
-def _ringcentral_row_to_event(row: dict[str, Any]) -> CallEvent:
-    """Map a RingCentral BigQuery row to the normalized CallEvent model."""
+def _ringcentral_record_to_event(record: dict[str, Any]) -> CallEvent:
+    """Map a RingCentral API call-log record to the normalized CallEvent model."""
 
-    raw_payload = dict(row)
+    from_party = _dict_value(record.get("from"))
+    to_party = _dict_value(record.get("to"))
+    recording = _dict_value(record.get("recording"))
+    from_name = _str_value(from_party.get("name"))
+    to_name = _str_value(to_party.get("name"))
+    patient_phone_primary = _str_value(to_party.get("phoneNumber"))
+    patient_phone_fallback = _str_value(from_party.get("phoneNumber"))
 
     return CallEvent(
-        call_id=_str_value(_required_value(raw_payload, "id")),
+        call_id=_str_value(_required_value(record, "id")),
         source=CallSource.RINGCENTRAL,
         workspace="medhub",
-        phone_from=_str_value(raw_payload.get("from_phonenumber")),
-        phone_to=_str_value(raw_payload.get("to_phonenumber")),
-        duration_sec=_int_value(raw_payload.get("duration")),
-        agent_id=None,
+        phone_from=patient_phone_primary,
+        phone_to=patient_phone_fallback,
+        patient_phone_primary=patient_phone_primary or None,
+        patient_phone_fallback=patient_phone_fallback or None,
+        duration_sec=_int_value(record.get("duration")),
+        agent_id=from_name or None,
         gcs_audio_uri=None,
-        raw_payload=raw_payload,
+        raw_payload={
+            "patient_phone_primary": patient_phone_primary,
+            "patient_phone_fallback": patient_phone_fallback,
+            "recording_content_uri": _str_value(recording.get("contentUri")),
+            "recording_id": _str_value(recording.get("id")),
+            "from_name": from_name,
+            "to_name": to_name,
+            "direction": _str_value(record.get("direction")),
+        },
+    )
+
+
+def _is_ringcentral_connected_record(
+    record: dict[str, Any],
+    *,
+    min_duration_seconds: int,
+) -> bool:
+    """Return True when a RingCentral record is eligible for processing."""
+
+    recording = _dict_value(record.get("recording"))
+    return (
+        _str_value(record.get("result")) == "Call connected"
+        and _int_value(record.get("duration")) >= min_duration_seconds
+        and bool(_str_value(recording.get("contentUri")))
     )
 
 
@@ -248,6 +302,14 @@ def _nested_str(payload: dict[str, Any], *keys: str) -> str:
     return _str_value(value)
 
 
+def _dict_value(value: Any) -> dict[str, Any]:
+    """Return a mapping payload as a plain dictionary."""
+
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    return {}
+
+
 def _required_value(payload: dict[str, Any], key: str) -> Any:
     """Read a required BigQuery field."""
 
@@ -279,3 +341,9 @@ def _int_value(value: Any) -> int:
     if value is None or value == "":
         return 0
     return int(value)
+
+
+def _isoformat_utc(value: datetime) -> str:
+    """Format a datetime for RingCentral API date filters."""
+
+    return value.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")

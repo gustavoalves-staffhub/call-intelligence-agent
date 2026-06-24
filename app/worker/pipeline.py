@@ -11,6 +11,12 @@ from app.worker.steps import s6_route, s7_write, s8_audit
 
 logger = logging.getLogger(__name__)
 
+MANUAL_REVIEW_ERROR_MESSAGE = "Lead match requires manual review; CRM write skipped."
+
+
+class ManualReviewRequiredError(ValueError):
+    """Raised when a call was routed to manual review instead of CRM write."""
+
 
 async def run(event: CallEvent) -> None:
     """Run the call pipeline from idempotency check through audit logging."""
@@ -35,7 +41,7 @@ async def run(event: CallEvent) -> None:
         match_result = await s5_match.match_lead(event, get_crm_clients())
 
         if match_result.requires_review:
-            raise ValueError("Lead match requires manual review; CRM write skipped.")
+            raise ManualReviewRequiredError(MANUAL_REVIEW_ERROR_MESSAGE)
 
         s6_route.route(match_result, event)
         await s7_write.write_note(match_result, note, event, transcript)

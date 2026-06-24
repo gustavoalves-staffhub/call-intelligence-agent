@@ -30,6 +30,7 @@ async def log_result(
             "gcs_transcript_uri": None,
             "match_confidence": match.confidence,
             "match_method": match.method.value,
+            "matched_on_phone": match.matched_on_phone,
             "note_created": error is None and bool(match.crm_record_id),
             "review_required": match.requires_review,
             "error_message": error,

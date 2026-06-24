@@ -15,7 +15,6 @@ name { firstName lastName }
 emails { primaryEmail }
 phones { primaryPhoneCallingCode primaryPhoneNumber }
 birthDate
-summary
 contactAttemptCount
 """
 
@@ -138,28 +137,26 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
             transcription=transcription,
             direction=_call_direction(event),
             from_phone=event.phone_from,
-            to_phone=event.phone_to,
+            to_phone=_phone_call_to_phone(event),
             lead_id=lead_id,
             record_url=event.gcs_audio_uri,
             record_updated=True,
+            call_name=_phone_call_name(event.call_id),
             agent_name=event.agent_id,
         )
         note_id = await self.create_note_only(
             title=f"Call Intelligence - {event.call_id}",
-            markdown=_format_note_markdown(note, transcript_uri),
+            markdown=_format_note_markdown(note, transcription, event.gcs_audio_uri),
         )
         note_target_id = await self.create_note_target(
             note_id=note_id,
             phone_call_id=phone_call_id,
             lead_id=lead_id,
         )
-        current_contact_attempt_count = await self.get_contact_attempt_count(lead_id)
         await self.update_fields(
             lead_id,
             {
-                "summary": note.summary,
-                "lastContactAttemptAt": _call_timestamp(event),
-                "contactAttemptCount": current_contact_attempt_count + 1,
+                "contactAttemptCount": 1,
             },
         )
         return CallWriteResult(
@@ -179,6 +176,7 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
         lead_id: str,
         record_url: str | None,
         record_updated: bool,
+        call_name: str,
         agent_name: str | None = None,
     ) -> str:
         """Create a Twenty PhoneCall linked to a Lead."""
@@ -191,6 +189,7 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
         variables = {
             "data": {
                 "remoteCallId": remote_call_id,
+                "callName": call_name,
                 "transcription": transcription,
                 "direction": direction,
                 "from": _call_contact(from_phone, agent_name),
@@ -217,7 +216,15 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
         _ = record_id
         return await self.create_note_only(
             title="Call Intelligence Note",
-            markdown=f"## Call Summary\n\n{content.strip()}\n\n## GCS Transcript\n\n{transcript_uri}",
+            markdown=(
+                f"## Call Summary\n\n{content.strip()}\n\n"
+                "## Disposition\n\nNone\n\n"
+                "## Next Steps\n\nNone\n\n"
+                "## Injury Details\n\nNone\n\n"
+                "## Objections\n\nNone\n\n"
+                f"## Transcript\n\n{transcript_uri or 'No transcript text available.'}\n\n"
+                "## Audio Recording\n\nNo recording link available."
+            ),
         )
 
     async def create_note_only(self, title: str, markdown: str) -> str:
@@ -273,20 +280,29 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
         return str(note_target_id)
 
     async def update_fields(self, record_id: str, fields: dict[str, Any]) -> None:
-        """Update approved native Lead fields only."""
+        """Update approved native Lead fields.
+
+        The agent must never write operations-owned Lead fields such as summary
+        or lastContactAttemptAt. Extracted summaries belong only in Note bodyV2.
+        """
 
         blocked_fields = {"callDisposition", "nextFollowUpAt"} & set(fields)
         if blocked_fields:
             # TODO: custom fields pending DATA_MODEL approval from workspace admin
             raise NotImplementedError(_CUSTOM_FIELD_PENDING_MESSAGE)
 
-        update_data: dict[str, Any] = {}
-        if "summary" in fields:
-            update_data["summary"] = fields["summary"]
-        if "lastContactAttemptAt" in fields:
-            update_data["lastContactAttemptAt"] = _coerce_datetime(fields["lastContactAttemptAt"])
-        if "contactAttemptCount" in fields:
-            update_data["contactAttemptCount"] = int(fields["contactAttemptCount"])
+        current_fields = await self.get_lead_update_state(record_id)
+        update_data = _build_lead_update_payload(
+            current_fields=current_fields,
+            requested_fields=fields,
+        )
+        if not update_data:
+            return
+
+        await self._send_update_lead(record_id, update_data)
+
+    async def _send_update_lead(self, record_id: str, update_data: dict[str, Any]) -> None:
+        """Send an updateLead mutation after overwrite guards have filtered payload."""
 
         mutation = """
           mutation UpdateLead($id: UUID!, $data: LeadUpdateInput!) {
@@ -307,8 +323,14 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
     async def get_contact_attempt_count(self, lead_id: str) -> int:
         """Read the current contactAttemptCount for a Lead by id."""
 
+        lead = await self.get_lead_update_state(lead_id)
+        return _coerce_contact_attempt_count(lead.get("contactAttemptCount"), lead_id)
+
+    async def get_lead_update_state(self, lead_id: str) -> dict[str, Any]:
+        """Read current Lead fields that must be protected from overwrite."""
+
         query = """
-          query GetLeadContactAttemptCount($id: UUID!) {
+          query GetLeadUpdateState($id: UUID!) {
             leads(filter: { id: { eq: $id } }) {
               edges {
                 node {
@@ -323,17 +345,7 @@ class IntakeCRMClient(TwentyGraphQLClient, CRMClient):
         lead = self.first_edge_node(data.get("leads"))
         if lead is None:
             raise TwentyCRMError(f"Lead {lead_id!r} was not found.")
-
-        raw_count = lead.get("contactAttemptCount")
-        if raw_count is None:
-            return 0
-
-        try:
-            return int(raw_count)
-        except (TypeError, ValueError) as exc:
-            raise TwentyCRMError(
-                f"Lead {lead_id!r} returned invalid contactAttemptCount: {raw_count!r}"
-            ) from exc
+        return lead
 
     async def update_call_disposition(self, record_id: str, call_disposition: str) -> None:
         """Update callDisposition once the workspace data model is approved."""
@@ -359,17 +371,90 @@ def _split_name(name: str) -> tuple[str, str]:
     return parts[0], " ".join(parts[1:])
 
 
-def _format_note_markdown(note: ExtractedNote, transcript_uri: str | None) -> str:
+def _format_note_markdown(
+    note: ExtractedNote,
+    transcription: str,
+    gcs_audio_uri: str | None,
+) -> str:
     """Build the Note bodyV2 markdown required for call notes."""
 
-    link = transcript_uri or "No GCS transcript link available."
-    return f"## Call Summary\n\n{note.summary.strip()}\n\n## GCS Transcript\n\n{link}"
+    injury_details = getattr(note, "injury_details", None) or getattr(
+        note,
+        "patient_complaints",
+        None,
+    )
+    return (
+        f"## Call Summary\n\n{_markdown_value(note.summary)}\n\n"
+        f"## Disposition\n\n{_markdown_value(note.disposition)}\n\n"
+        f"## Next Steps\n\n{_markdown_value(note.next_steps)}\n\n"
+        f"## Injury Details\n\n{_markdown_value(injury_details)}\n\n"
+        f"## Objections\n\n{_markdown_value(note.objections)}\n\n"
+        f"## Transcript\n\n{_markdown_value(transcription)}\n\n"
+        f"## Audio Recording\n\n{_markdown_value(gcs_audio_uri, fallback='No recording link available.')}"
+    )
+
+
+def _markdown_value(value: Any, fallback: str = "None") -> str:
+    """Render optional extracted fields for markdown."""
+
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else fallback
+    return str(value)
+
+
+def _build_lead_update_payload(
+    *,
+    current_fields: dict[str, Any],
+    requested_fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Build an updateLead payload for fields the agent may modify."""
+
+    update_data: dict[str, Any] = {}
+
+    if "contactAttemptCount" in requested_fields:
+        update_data["contactAttemptCount"] = _coerce_contact_attempt_count(
+            current_fields.get("contactAttemptCount"),
+            str(current_fields.get("id") or "unknown"),
+        ) + 1
+
+    return update_data
+
+
+def _coerce_contact_attempt_count(raw_count: Any, lead_id: str) -> int:
+    """Coerce Twenty contactAttemptCount to an integer, treating null as zero."""
+
+    if raw_count is None:
+        return 0
+
+    try:
+        return int(raw_count)
+    except (TypeError, ValueError) as exc:
+        raise TwentyCRMError(
+            f"Lead {lead_id!r} returned invalid contactAttemptCount: {raw_count!r}"
+        ) from exc
 
 
 def _call_contact(phone: str, name: str | None) -> dict[str, str | None]:
     """Build Twenty CALL_CONTACT metadata."""
 
     return {"name": name, "phoneNumber": phone}
+
+
+def _phone_call_to_phone(event: CallEvent) -> str:
+    """Return the lead-facing phone number for Twenty PhoneCall.to."""
+
+    if event.source is CallSource.PHONEBURNER:
+        return event.phone_from
+    return event.phone_to
+
+
+def _phone_call_name(call_id: str) -> str:
+    """Return the stable Twenty callName for a call."""
+
+    return f"Call Intelligence - {call_id}"
 
 
 def _call_direction(event: CallEvent) -> str:

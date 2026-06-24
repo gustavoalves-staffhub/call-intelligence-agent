@@ -1,6 +1,7 @@
 """CRM lead matching result models."""
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -24,3 +25,4 @@ class MatchResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     method: MatchMethod
     requires_review: bool
+    matched_on_phone: Literal["primary", "fallback", "none"] = "none"

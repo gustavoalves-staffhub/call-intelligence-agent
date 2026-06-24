@@ -1,7 +1,6 @@
 """Step 2: fetch or verify call recording."""
 
-import httpx
-
+from app.adapters.telephony.ringcentral import RingCentralAdapter
 from app.config import get_settings
 from app.models.call_event import CallEvent, CallSource
 from app.storage.gcs import file_exists, upload_bytes
@@ -28,29 +27,23 @@ async def fetch_recording(event: CallEvent) -> CallEvent:
 
 
 async def _fetch_ringcentral_recording(event: CallEvent) -> CallEvent:
-    """Fetch RingCentral audio by record_uri, upload it to GCS, and return the updated event."""
+    """Fetch RingCentral audio by contentUri, upload it to GCS, and return the updated event."""
 
     settings = get_settings()
-    record_uri = event.raw_payload.get("record_uri")
-    if not isinstance(record_uri, str) or not record_uri.strip():
-        raise ValueError("RingCentral call is missing record_uri in raw_payload.")
-    if not settings.telephony.ringcentral.access_token:
-        raise RuntimeError("RINGCENTRAL_ACCESS_TOKEN must be configured to fetch call audio.")
+    content_uri = event.raw_payload.get("recording_content_uri")
+    if not isinstance(content_uri, str) or not content_uri.strip():
+        raise ValueError("RingCentral call is missing recording_content_uri in raw_payload.")
     if not settings.gcs.ringcentral_bucket:
         raise RuntimeError("GCS_RINGCENTRAL_BUCKET must be configured to store RingCentral audio.")
 
-    # TODO: implement token refresh flow — RingCentral access tokens expire, refresh needed for production
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.get(
-            record_uri,
-            headers={"Authorization": f"Bearer {settings.telephony.ringcentral.access_token}"},
-        )
-        response.raise_for_status()
+    adapter = RingCentralAdapter()
+    access_token = await adapter.get_access_token()
+    audio_bytes = await adapter.get_recording_bytes(content_uri, access_token)
 
     destination_uri = f"gs://{settings.gcs.ringcentral_bucket}/{event.call_id}.mp3"
     uploaded_uri = await upload_bytes(
-        response.content,
+        audio_bytes,
         destination_uri,
-        content_type=response.headers.get("content-type", "audio/mpeg"),
+        content_type="audio/mpeg",
     )
     return event.model_copy(update={"gcs_audio_uri": uploaded_uri})

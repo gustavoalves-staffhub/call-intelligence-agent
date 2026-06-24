@@ -9,7 +9,7 @@ for the MedHub Twenty CRM workspace.
 Return strict JSON only. Do not wrap the JSON in markdown. The JSON object must
 match this schema:
 {
-  "summary": "string",
+  "summary": "string, detailed 4-6 sentence summary in English",
   "disposition": "string, e.g. Scheduled, Callback, Not Interested, or no data",
   "next_steps": "string or no data",
   "callback_date": "YYYY-MM-DD or null when no date is mentioned",
@@ -24,6 +24,14 @@ match this schema:
 Anti-hallucination rule: if a field is not mentioned in the transcript, return
 "no data" for that field. Never infer or fabricate facts. Use null only for
 date fields that require a JSON date or null value.
+
+Write the summary in English even when the transcript is Spanish. Write a
+detailed summary of 4-6 sentences covering: who was called and why; key facts
+about the accident, including date, location, type, and fault when explicitly
+stated; injuries and medical treatment mentioned; current legal situation,
+including attorney involvement, signed documents, or interest level; and the
+outcome of this specific call plus any next steps agreed upon. Never use generic
+phrases like "the agent called". Be specific.
 
 Set pii_detected to true if names, SSNs, DOBs, or medical data are present.
 """

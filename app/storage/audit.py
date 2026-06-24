@@ -1,5 +1,6 @@
 """PostgreSQL audit log helpers."""
 
+from collections.abc import Sequence
 from typing import Any
 
 import asyncpg
@@ -18,11 +19,30 @@ _ALLOWED_COLUMNS = {
     "gcs_transcript_uri",
     "match_confidence",
     "match_method",
+    "matched_on_phone",
     "note_created",
     "review_required",
     "error_message",
     "processed_at",
 }
+
+IS_PROCESSED_QUERY = """
+SELECT EXISTS (
+    SELECT 1
+    FROM call_audit_log
+    WHERE call_id = $1
+      AND processed_at IS NOT NULL
+      AND error_message IS NULL
+)
+"""
+
+PROCESSED_CALL_IDS_QUERY = """
+SELECT call_id
+FROM call_audit_log
+WHERE call_id = ANY($1)
+  AND processed_at IS NOT NULL
+  AND error_message IS NULL
+"""
 
 
 async def upsert_call_log(row: dict[str, Any]) -> None:
@@ -61,22 +81,26 @@ async def is_processed(call_id: str) -> bool:
 
     connection = await _connect()
     try:
-        value = await connection.fetchval(
-            """
-            SELECT EXISTS (
-                SELECT 1
-                FROM call_audit_log
-                WHERE call_id = $1
-                  AND processed_at IS NOT NULL
-                  AND error_message IS NULL
-            )
-            """,
-            call_id,
-        )
+        value = await connection.fetchval(IS_PROCESSED_QUERY, call_id)
     finally:
         await connection.close()
 
     return bool(value)
+
+
+async def processed_call_ids(call_ids: Sequence[str]) -> set[str]:
+    """Return candidate call IDs that already have successful audit-log rows."""
+
+    if not call_ids:
+        return set()
+
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(PROCESSED_CALL_IDS_QUERY, list(call_ids))
+    finally:
+        await connection.close()
+
+    return {str(row["call_id"]) for row in rows}
 
 
 async def _connect() -> asyncpg.Connection:
