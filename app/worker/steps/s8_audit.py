@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from app.models.call_event import CallEvent
 from app.models.match_result import MatchResult
 from app.models.note import ExtractedNote
-from app.storage.audit import upsert_call_log
+from app.storage.audit import TERMINAL_PROCESSED_ERROR_MESSAGES, upsert_call_log
 
 
 async def log_result(
@@ -17,6 +17,7 @@ async def log_result(
     """Upsert pipeline result details into call_audit_log."""
 
     _ = note
+    is_terminal_state = error is None or error in TERMINAL_PROCESSED_ERROR_MESSAGES
     await upsert_call_log(
         {
             "call_id": event.call_id,
@@ -31,9 +32,13 @@ async def log_result(
             "match_confidence": match.confidence,
             "match_method": match.method.value,
             "matched_on_phone": match.matched_on_phone,
-            "note_created": error is None and bool(match.crm_record_id),
+            "note_created": (
+                error is None
+                and bool(match.crm_record_id)
+                and not match.requires_review
+            ),
             "review_required": match.requires_review,
             "error_message": error,
-            "processed_at": datetime.now(UTC) if error is None else None,
+            "processed_at": datetime.now(UTC) if is_terminal_state else None,
         }
     )

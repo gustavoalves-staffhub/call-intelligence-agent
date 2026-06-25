@@ -26,13 +26,28 @@ _ALLOWED_COLUMNS = {
     "processed_at",
 }
 
+DEEPGRAM_NO_TRANSCRIPT_ERROR_MESSAGE = "Deepgram returned no transcript"
+DEEPGRAM_BAD_REQUEST_ERROR_MESSAGE = (
+    "Deepgram bad request: corrupt or unsupported audio"
+)
+TERMINAL_PROCESSED_ERROR_MESSAGES = {
+    DEEPGRAM_NO_TRANSCRIPT_ERROR_MESSAGE,
+    DEEPGRAM_BAD_REQUEST_ERROR_MESSAGE,
+}
+
 IS_PROCESSED_QUERY = """
 SELECT EXISTS (
     SELECT 1
     FROM call_audit_log
     WHERE call_id = $1
       AND processed_at IS NOT NULL
-      AND error_message IS NULL
+      AND (
+        error_message IS NULL
+        OR error_message IN (
+          'Deepgram returned no transcript',
+          'Deepgram bad request: corrupt or unsupported audio'
+        )
+      )
 )
 """
 
@@ -41,7 +56,13 @@ SELECT call_id
 FROM call_audit_log
 WHERE call_id = ANY($1)
   AND processed_at IS NOT NULL
-  AND error_message IS NULL
+  AND (
+    error_message IS NULL
+    OR error_message IN (
+      'Deepgram returned no transcript',
+      'Deepgram bad request: corrupt or unsupported audio'
+    )
+  )
 """
 
 

@@ -163,6 +163,14 @@ class PipelineSettings(EnvSettings):
         validation_alias="MATCH_CONFIDENCE_THRESHOLD",
     )
     poll_interval_minutes: int = Field(default=5, validation_alias="POLL_INTERVAL_MINUTES")
+    phoneburner_lookback_hours: int = Field(
+        default=24,
+        validation_alias="PHONEBURNER_LOOKBACK_HOURS",
+    )
+    ringcentral_lookback_minutes: int = Field(
+        default=5,
+        validation_alias="RINGCENTRAL_LOOKBACK_MINUTES",
+    )
     slack_review_queue_webhook_url: str = Field(
         default="",
         validation_alias="SLACK_REVIEW_QUEUE_WEBHOOK_URL",
@@ -189,6 +197,8 @@ class Settings(EnvSettings):
             "vertex_region": self.gcp.vertex_region,
             "bq_project": self.gcp.bq_project,
             "poll_interval_minutes": self.pipeline.poll_interval_minutes,
+            "phoneburner_lookback_hours": self.pipeline.phoneburner_lookback_hours,
+            "ringcentral_lookback_minutes": self.pipeline.ringcentral_lookback_minutes,
             "pubsub_topic": self.gcp.pubsub_topic_call_completed,
             "pubsub_subscription": self.gcp.pubsub_subscription_worker,
             "audio_bucket": self.gcs.audio_bucket,

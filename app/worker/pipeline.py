@@ -41,11 +41,14 @@ async def run(event: CallEvent) -> None:
         match_result = await s5_match.match_lead(event, get_crm_clients())
 
         if match_result.requires_review:
+            await s8_audit.log_result(event, match_result, note, error=None)
             raise ManualReviewRequiredError(MANUAL_REVIEW_ERROR_MESSAGE)
 
         s6_route.route(match_result, event)
         await s7_write.write_note(match_result, note, event, transcript)
         await s8_audit.log_result(event, match_result, note, error=None)
+    except ManualReviewRequiredError:
+        raise
     except Exception as exc:
         await s8_audit.log_result(event, match_result, note, error=str(exc))
         raise

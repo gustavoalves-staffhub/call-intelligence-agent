@@ -22,9 +22,12 @@ FROM `phoneburner_logs.call_events`
 WHERE connected = @connected
   AND duration >= @min_duration_seconds
   AND recording_gcs_uri IS NOT NULL
+  AND end_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_hours HOUR)
 ORDER BY end_time ASC
 """
 _MAX_UNPROCESSED_BATCH_SIZE = 200
+_RINGCENTRAL_CONNECTED_RESULT = "Call connected"
+_RINGCENTRAL_MIN_CALL_DURATION_SECONDS = 15
 
 
 async def poll_new_calls() -> list[CallEvent]:
@@ -36,8 +39,9 @@ async def poll_new_calls() -> list[CallEvent]:
     )
 
     events = [*phoneburner_events, *ringcentral_events]
-    capped_events = _cap_candidate_batch(events)
-    return await _filter_unprocessed(capped_events)
+    events = _dedupe_events_by_call_id(events)
+    unprocessed_events = await _filter_unprocessed(events)
+    return _cap_unprocessed_batch(unprocessed_events)
 
 
 async def check_idempotency(call_id: str) -> bool:
@@ -53,6 +57,7 @@ async def _poll_phoneburner() -> list[CallEvent]:
     rows = await _query_phoneburner_rows(
         bq_project=settings.gcp.bq_project,
         min_duration_seconds=settings.pipeline.min_call_duration_seconds,
+        lookback_hours=settings.pipeline.phoneburner_lookback_hours,
     )
     return [_phoneburner_row_to_event(row) for row in rows]
 
@@ -63,27 +68,21 @@ async def _poll_ringcentral_api() -> list[CallEvent]:
     settings = get_settings()
     adapter = RingCentralAdapter()
     date_from = _isoformat_utc(
-        datetime.now(UTC) - timedelta(minutes=settings.pipeline.poll_interval_minutes)
+        datetime.now(UTC) - timedelta(minutes=settings.pipeline.ringcentral_lookback_minutes)
     )
     records = await adapter.list_call_log(
         date_from=date_from,
         recording_type="All",
         per_page=100,
     )
-    return [
-        _ringcentral_record_to_event(record)
-        for record in records
-        if _is_ringcentral_connected_record(
-            record,
-            min_duration_seconds=settings.pipeline.min_call_duration_seconds,
-        )
-    ]
+    return _ringcentral_records_to_events(records)
 
 
 async def _query_phoneburner_rows(
     *,
     bq_project: str,
     min_duration_seconds: int,
+    lookback_hours: int,
 ) -> list[dict[str, Any]]:
     """Query all eligible PhoneBurner connected call rows."""
 
@@ -93,6 +92,7 @@ async def _query_phoneburner_rows(
         query_parameters=[
             _scalar_query_parameter("connected", "BOOL", True),
             _scalar_query_parameter("min_duration_seconds", "INT64", min_duration_seconds),
+            _scalar_query_parameter("lookback_hours", "INT64", lookback_hours),
         ],
     )
 
@@ -159,14 +159,39 @@ async def _filter_unprocessed(events: list[CallEvent]) -> list[CallEvent]:
     return [event for event in events if event.call_id not in already_processed_call_ids]
 
 
-def _cap_candidate_batch(events: list[CallEvent]) -> list[CallEvent]:
-    """Cap large candidate batches before Cloud SQL idempotency checks."""
+def _dedupe_events_by_call_id(events: list[CallEvent]) -> list[CallEvent]:
+    """Keep the first event for each call_id in one polling batch."""
+
+    seen_call_ids: set[str] = set()
+    deduped_events: list[CallEvent] = []
+    duplicate_count = 0
+
+    for event in events:
+        if event.call_id in seen_call_ids:
+            duplicate_count += 1
+            continue
+
+        seen_call_ids.add(event.call_id)
+        deduped_events.append(event)
+
+    if duplicate_count:
+        logger.warning(
+            "Dropped %d duplicate call_id event(s) from polling batch before "
+            "idempotency filtering.",
+            duplicate_count,
+        )
+
+    return deduped_events
+
+
+def _cap_unprocessed_batch(events: list[CallEvent]) -> list[CallEvent]:
+    """Cap large unprocessed batches after Cloud SQL idempotency checks."""
 
     if len(events) <= _MAX_UNPROCESSED_BATCH_SIZE:
         return events
 
     logger.warning(
-        "Candidate call count %d exceeds batch cap %d; checking the first %d "
+        "Unprocessed call count %d exceeds batch cap %d; processing the first %d "
         "event(s) this run and leaving the rest for later runs.",
         len(events),
         _MAX_UNPROCESSED_BATCH_SIZE,
@@ -231,6 +256,28 @@ def _ringcentral_record_to_event(record: dict[str, Any]) -> CallEvent:
     )
 
 
+def _ringcentral_records_to_events(records: Sequence[dict[str, Any]]) -> list[CallEvent]:
+    """Map eligible RingCentral records to events and debug-log skipped records."""
+
+    events: list[CallEvent] = []
+    for record in records:
+        if _is_ringcentral_connected_record(
+            record,
+            min_duration_seconds=_RINGCENTRAL_MIN_CALL_DURATION_SECONDS,
+        ):
+            events.append(_ringcentral_record_to_event(record))
+            continue
+
+        logger.debug(
+            "Skipping RingCentral call. call_id=%s result=%s duration=%s",
+            _str_value(record.get("id")),
+            _str_value(record.get("result")),
+            _int_value(record.get("duration")),
+        )
+
+    return events
+
+
 def _is_ringcentral_connected_record(
     record: dict[str, Any],
     *,
@@ -240,7 +287,7 @@ def _is_ringcentral_connected_record(
 
     recording = _dict_value(record.get("recording"))
     return (
-        _str_value(record.get("result")) == "Call connected"
+        _str_value(record.get("result")) == _RINGCENTRAL_CONNECTED_RESULT
         and _int_value(record.get("duration")) >= min_duration_seconds
         and bool(_str_value(recording.get("contentUri")))
     )

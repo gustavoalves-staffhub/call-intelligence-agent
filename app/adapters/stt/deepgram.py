@@ -1,11 +1,17 @@
 """Deepgram speech-to-text adapter."""
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from deepgram import AsyncDeepgramClient
+from deepgram.core.api_error import ApiError
 
 from app.adapters.stt.base import STTAdapter
 from app.storage.gcs import download_bytes
+
+
+class DeepgramCreditsExhaustedError(RuntimeError):
+    """Raised when Deepgram rejects transcription because credits are exhausted."""
 
 
 class DeepgramAdapter(STTAdapter):
@@ -27,15 +33,43 @@ class DeepgramAdapter(STTAdapter):
 
         audio_bytes = await download_bytes(gcs_uri)
         client = AsyncDeepgramClient(api_key=self.api_key)
-        response = await client.listen.v1.media.transcribe_file(
-            request=audio_bytes,
-            model="nova-2-phonecall",
-            diarize=True,
-            detect_language=True,
-            utterances=True,
-        )
+        try:
+            response = await client.listen.v1.media.transcribe_file(
+                request=audio_bytes,
+                model="nova-2-phonecall",
+                diarize=True,
+                detect_language=True,
+                utterances=True,
+            )
+        except ApiError as exc:
+            if _is_deepgram_credits_exhausted_error(exc):
+                raise DeepgramCreditsExhaustedError(
+                    "Deepgram credits exhausted: ASR_PAYMENT_REQUIRED"
+                ) from exc
+            raise
 
         return _format_deepgram_transcript(_response_to_dict(response))
+
+
+def _is_deepgram_credits_exhausted_error(error: ApiError) -> bool:
+    """Return True for Deepgram 402 ASR payment-required responses."""
+
+    if error.status_code != 402:
+        return False
+
+    body = error.body
+    if isinstance(body, Mapping):
+        err_code = body.get("err_code")
+        if isinstance(err_code, str) and err_code == "ASR_PAYMENT_REQUIRED":
+            return True
+
+        err_msg = body.get("err_msg")
+        if isinstance(err_msg, str) and "not enough credits" in err_msg.lower():
+            return True
+
+    headers = error.headers or {}
+    dg_error = headers.get("dg-error")
+    return isinstance(dg_error, str) and "not enough credits" in dg_error.lower()
 
 
 def _response_to_dict(response: Any) -> dict[str, Any]:

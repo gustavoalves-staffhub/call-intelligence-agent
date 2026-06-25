@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -15,6 +16,7 @@ _NOTE_MODELS: dict[str, type[ExtractedNote]] = {
     "medhub": MedHubCallNote,
     "grs": GRSCallNote,
 }
+logger = logging.getLogger(__name__)
 
 
 async def extract(transcript: str, workspace: str) -> ExtractedNote:
@@ -53,7 +55,21 @@ async def extract(transcript: str, workspace: str) -> ExtractedNote:
         ],
     )
 
-    raw_response = _response_text(response.content)
+    return _parse_note_or_default(
+        raw_response=_response_text(response.content),
+        note_model=note_model,
+        workspace=workspace,
+    )
+
+
+def _parse_note_or_default(
+    *,
+    raw_response: str,
+    note_model: type[ExtractedNote],
+    workspace: str,
+) -> ExtractedNote:
+    """Parse Claude JSON, falling back to a minimal note for unusable responses."""
+
     raw = raw_response.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -62,23 +78,40 @@ async def extract(transcript: str, workspace: str) -> ExtractedNote:
 
     try:
         raw_note = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Anthropic response was not valid strict JSON: {raw_response}"
-        ) from exc
+        if not isinstance(raw_note, dict):
+            raise ValueError("Anthropic response JSON must be an object.")
 
-    if not isinstance(raw_note, dict):
-        raise ValueError(f"Anthropic response JSON must be an object: {raw_response}")
-
-    _normalize_callback_date(raw_note)
-    _reject_unexpected_fields(raw_note, note_model, raw_response)
-
-    try:
+        _normalize_callback_date(raw_note)
+        _reject_unexpected_fields(raw_note, note_model, raw_response)
         return note_model.model_validate(raw_note)
-    except ValidationError as exc:
-        raise ValueError(
-            f"Anthropic response did not match {note_model.__name__}: {raw_response}"
-        ) from exc
+    except (json.JSONDecodeError, ValueError, ValidationError) as exc:
+        logger.warning(
+            "Claude extraction response was not usable; returning default note. "
+            "workspace=%s reason=%s",
+            workspace,
+            exc,
+        )
+        return _default_note(note_model)
+
+
+def _default_note(note_model: type[ExtractedNote]) -> ExtractedNote:
+    """Return a schema-valid fallback note for too-short or unusable transcripts."""
+
+    raw_note: dict[str, Any] = {
+        "summary": "Transcript too short to extract meaningful information.",
+        "disposition": "No Answer",
+        "next_steps": None,
+        "callback_date": None,
+        "sentiment": "neutral",
+        "objections": None,
+        "pii_detected": False,
+        "confidence": 0.0,
+    }
+
+    for field_name in note_model.model_fields:
+        raw_note.setdefault(field_name, None)
+
+    return note_model.model_validate(raw_note)
 
 
 def _response_text(content_blocks: Any) -> str:

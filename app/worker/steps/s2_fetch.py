@@ -4,14 +4,17 @@ from app.adapters.telephony.ringcentral import RingCentralAdapter
 from app.config import get_settings
 from app.models.call_event import CallEvent, CallSource
 from app.storage.gcs import file_exists, upload_bytes
+from app.worker.steps.s1_ingest import _RINGCENTRAL_MIN_CALL_DURATION_SECONDS
 
 
 async def fetch_recording(event: CallEvent) -> CallEvent:
     """Verify PhoneBurner audio or fetch RingCentral audio into GCS."""
 
-    settings = get_settings()
-    if event.duration_sec < settings.pipeline.min_call_duration_seconds:
-        raise ValueError("Call duration is below MIN_CALL_DURATION_SECONDS; skipping processing.")
+    min_duration_seconds = _min_duration_seconds_for_event(event)
+    if event.duration_sec < min_duration_seconds:
+        raise ValueError(
+            f"Call duration is below {min_duration_seconds} seconds; skipping processing."
+        )
 
     if event.source is CallSource.PHONEBURNER:
         if not event.gcs_audio_uri:
@@ -24,6 +27,15 @@ async def fetch_recording(event: CallEvent) -> CallEvent:
         return await _fetch_ringcentral_recording(event)
 
     raise ValueError(f"Unsupported call source: {event.source}")
+
+
+def _min_duration_seconds_for_event(event: CallEvent) -> int:
+    """Return the source-specific minimum duration before recording fetch."""
+
+    if event.source is CallSource.RINGCENTRAL:
+        return _RINGCENTRAL_MIN_CALL_DURATION_SECONDS
+
+    return get_settings().pipeline.min_call_duration_seconds
 
 
 async def _fetch_ringcentral_recording(event: CallEvent) -> CallEvent:
